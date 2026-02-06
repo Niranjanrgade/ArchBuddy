@@ -30,15 +30,15 @@ class ToolManager:
         return Tool(
             name="web_search",
             func=serper.run,
-            description="Search the internet for current information about Azure services"
+            description="Search the internet for current information about AWS services"
         )
     
     def _init_rag(self) -> Tool:
         """Initialize RAG search for vector database."""
         embeddings = OllamaEmbeddings(model="nomic-embed-text")
         vector_store = Chroma(
-            collection_name="AzureDocs",
-            persist_directory="./chroma_db_AzureDocs",
+            collection_name="AWSDocs",
+            persist_directory="./chroma_db_AWSDocs",
             embedding_function=embeddings,
         )
         
