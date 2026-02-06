@@ -41,6 +41,7 @@ dependencies = [
     { name = "isort" },
     { name = "jupyterlab" },
     { name = "langchain" },
+    { name = "langgraph" },
     { name = "python-dotenv" },
 ]
 
@@ -50,6 +51,7 @@ requires-dist = [
     { name = "isort", specifier = ">=7.0.0" },
     { name = "jupyterlab", specifier = ">=4.5.3" },
     { name = "langchain", specifier = ">=1.2.8" },
+    { name = "langgraph", specifier = ">=1.0.7" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
 ]
 
