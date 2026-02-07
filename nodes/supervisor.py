@@ -4,10 +4,11 @@
 # ============================================================================
 
 from typing import cast
-from langchain_core.messages import SystemMessage, AIMessage
+from langchain_core.messages import SystemMessage
 from core.types import ArchitectureState
 from core.schemas import TaskDecomposition
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -18,24 +19,11 @@ def architect_supervisor(
     max_retries: int = 3
 ) -> ArchitectureState:
     """
-    Orchestrate architecture generation.
+    Break down user's problem into tasks for domain architects.
     
-    ROLE: Break down user's problem into tasks for domain architects.
-    
-    WHAT HAPPENS:
-    1. Takes user problem (e.g., "Build microservices on AWS")
-    2. Creates a task for each domain (compute, network, storage, database)
-    3. Returns these tasks for domain architects to work on
-    
-    HOW IT WORKS:
-    - Uses structured output (Pydantic model) to force LLM to return valid tasks
-    - With_structured_output ensures output matches TaskDecomposition schema
-    - If LLM fails, retry up to 3 times
-    
-    WHY SEPARATE FROM VALIDATORS?
-    - Supervisor makes architectural decisions (what to build)
-    - Validators check correctness (is it correct?)
-    - These are different concerns, so different nodes
+    ROLE: Orchestrate architecture generation.
+    INPUT: User's problem statement
+    OUTPUT: Tasks assigned to compute, network, storage, database architects
     """
     
     iteration = state["iteration_count"] + 1
@@ -46,10 +34,11 @@ def architect_supervisor(
         previous_feedback = state.get("validation_feedback", [])
         feedback_context = ""
         if previous_feedback:
-            feedback_context = "\n\nIssues found in previous iteration:\n"
+            feedback_context = "\n\n**Issues found in previous iteration:**\n"
             for fb in previous_feedback:
                 domain = fb.get("domain", "?")
-                feedback_context += f"- {domain}: {fb.get('validation_result', '')[:100]}...\n"
+                result = fb.get("result", "")[:100]
+                feedback_context += f"- {domain}: {result}...\n"
         
         system_prompt = f"""
 You are an AWS architect supervisor.
@@ -75,14 +64,12 @@ For each domain, provide:
 If this is a refinement iteration, address the issues found.
         """
         
-        # Get LLM with structured output
         structured_llm = llm_manager.get_reasoning_structured(TaskDecomposition)
+        messages = [SystemMessage(content=system_prompt)]
         
-        # Retry loop
         task_decomposition = None
         for attempt in range(max_retries):
             try:
-                messages = [SystemMessage(content=system_prompt)]
                 response = structured_llm.invoke(messages)
                 task_decomposition = cast(TaskDecomposition, response)
                 
@@ -117,14 +104,14 @@ If this is a refinement iteration, address the issues found.
         return cast(ArchitectureState, {
             "architecture_domain_tasks": domain_tasks_update,
             "iteration_count": iteration,
-            "validation_feedback": [],  # Reset for new iteration
-            "architecture_components": {},  # Clear old components
-            "factual_errors_exist": False,  # Reset error flag
+            "validation_feedback": [],
+            "architecture_components": {},
+            "has_validation_errors": False,
         })
     
     except Exception as e:
         logger.error(f"Supervisor error: {e}", exc_info=True)
         return cast(ArchitectureState, {
             "iteration_count": iteration,
-            "factual_errors_exist": True,  # Mark as error
+            "has_validation_errors": True,
         })

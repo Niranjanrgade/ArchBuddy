@@ -3,38 +3,37 @@
 # PURPOSE: Validate architecture against AWS documentation
 # ============================================================================
 
-from typing import cast, Dict, Any, Optional
+from typing import cast, Dict, Any, List
 from langchain_core.messages import SystemMessage, HumanMessage
 from core.types import ArchitectureState
 from core.execution import execute_tool_calls, detect_errors_llm
-from core.schemas import ValidationTask, ValidationDecomposition
+from core.schemas import ValidationDecomposition
 import logging
 import time
 
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# VALIDATION STRATEGY
-# ============================================================================
-# After architects design the architecture, validators check if it's correct.
-#
-# WHAT WE VALIDATE:
-# 1. Factual correctness: "Does this service exist?" "Is this config valid?"
-# 2. Best practices: "Is this following AWS recommendations?"
-# 3. Compatibility: "Do these services work together?"
-# 4. Cost: "Is this cost-effective?"
-# 5. Security: "Are there security issues?"
-#
-# HOW WE VALIDATE:
-# - Use RAG search to find official AWS documentation
-# - Use LLM to compare architect's recommendations to docs
-# - Flag discrepancies as errors
-#
-# WHY NOT JUST ONE VALIDATOR?
-# Because we need expertise per domain. A compute validator knows EC2, Lambda.
-# A network validator knows VPCs, Security Groups. They're specialized.
-# ============================================================================
+def get_services_for_domain(domain: str) -> List[str]:
+    """Services to validate for each domain."""
+    services = {
+        "compute": ["EC2", "Lambda", "ECS", "EKS", "Auto Scaling"],
+        "network": ["VPC", "Security Groups", "ALB", "NLB", "Route 53"],
+        "storage": ["S3", "EBS", "EFS", "Glacier"],
+        "database": ["RDS", "DynamoDB", "ElastiCache", "Aurora"]
+    }
+    return services.get(domain, [])
+
+
+def get_validation_focus(domain: str) -> str:
+    """What to specifically check."""
+    focus = {
+        "compute": "Instance types, sizing, Auto Scaling config, cost optimization",
+        "network": "VPC design, security groups, load balancing, routing",
+        "storage": "Bucket policies, encryption, lifecycle, access controls",
+        "database": "Engine choice, replication, backup, high availability"
+    }
+    return focus.get(domain, "general validation")
 
 
 def validator_supervisor(
@@ -42,75 +41,34 @@ def validator_supervisor(
     llm_manager
 ) -> ArchitectureState:
     """
-    Break down validation tasks by domain.
+    Decide what to validate.
     
-    WHY A SUPERVISOR?
-    Just like architects need a supervisor to assign tasks,
-    validators need a supervisor to decide what to validate.
-    
-    WHAT IT DOES:
-    1. Looks at the proposed architecture
-    2. Decides what needs validation in each domain
-    3. Creates validation tasks
-    4. Passes them to domain validators
-    
-    Example:
-    Input: proposed_architecture mentions "EC2 t3.large auto-scaling"
-    Output:
-      - Validate compute: EC2, Auto Scaling config
-      - Validate network: VPC, Security Groups for EC2
-      - Validate storage: Any EBS volumes for EC2
+    ROLE: Create validation tasks for each domain.
+    INPUT: Proposed architecture from synthesizer
+    OUTPUT: Validation tasks assigned to validators
     """
     
     logger.info("--- Validator Supervisor ---")
     
     try:
         architecture_components = state.get("architecture_components", {})
-        proposed_architecture = state.get("proposed_architecture", {})
         
-        system_prompt = f"""
-You are a validation supervisor for AWS architecture.
-You will break down the architecture into validation tasks.
-
-**Architecture Components**:
-{architecture_components}
-
-**Proposed Architecture**:
-{proposed_architecture.get('architecture_summary', 'N/A')[:5000]}...
-
-For each domain with components (compute, network, storage, database):
-1. List specific AWS services to validate
-2. Specify validation focus (config, best practices, compatibility)
-3. Explain what to check
-
-Output as JSON matching ValidationDecomposition schema.
-        """
-        
-        try:
-            # Get structured LLM
-            structured_llm = llm_manager.get_reasoning_structured(ValidationDecomposition)
-            messages = [SystemMessage(content=system_prompt)]
-            
-            response = structured_llm.invoke(messages)
-            validation_decomposition = cast(ValidationDecomposition, response)
-            
-            if not validation_decomposition or not validation_decomposition.validation_tasks:
-                raise ValueError("Empty validation decomposition")
-        
-        except Exception as e:
-            logger.warning(f"Structured output failed, returning empty tasks: {e}")
-            validation_decomposition = ValidationDecomposition(validation_tasks=[])
-        
-        # ============ FORMAT FOR STATE ============
+        # For each domain that has components, create validation task
         validation_tasks_update = {}
-        for task in validation_decomposition.validation_tasks:
-            domain_key = task.domain.lower()
-            validation_tasks_update[domain_key] = {
-                "components_to_validate": task.components_to_validate,
-                "validation_focus": task.validation_focus
+        
+        for domain in architecture_components.keys():
+            validation_tasks_update[domain] = {
+                "components_to_validate": get_services_for_domain(domain),
+                "validation_focus": get_validation_focus(domain)
             }
         
-        # Merge with existing domain tasks
+        if not validation_tasks_update:
+            logger.info("No components to validate")
+            return cast(ArchitectureState, {
+                "architecture_domain_tasks": state.get("architecture_domain_tasks", {})
+            })
+        
+        # Merge with existing tasks
         from core.types import merge_dicts
         existing_tasks = state.get("architecture_domain_tasks", {})
         merged = merge_dicts(existing_tasks, {"validation_tasks": validation_tasks_update})
@@ -122,7 +80,7 @@ Output as JSON matching ValidationDecomposition schema.
         })
     
     except Exception as e:
-        logger.error(f"Validator supervisor error: {e}", exc_info=True)
+        logger.error(f"Validator supervisor error: {e}")
         return cast(ArchitectureState, {
             "architecture_domain_tasks": state.get("architecture_domain_tasks", {})
         })
@@ -131,31 +89,16 @@ Output as JSON matching ValidationDecomposition schema.
 def generic_domain_validator(
     state: ArchitectureState,
     domain: str,
-    validation_focus_description: str,
     llm_manager,
     tool_manager,
-    timeout: float = 300.0
+    timeout: float = 60.0
 ) -> ArchitectureState:
     """
-    Generic validator for any domain.
+    Validate architect recommendations against AWS docs.
     
-    FLOW:
-    1. Get validation task for this domain
-    2. Get the architect's recommendations for this domain
-    3. Use RAG to search AWS docs for the services mentioned
-    4. Compare recommendations to documentation
-    5. Flag any errors or issues
-    6. Return feedback
-    
-    Args:
-        state: Current state
-        domain: "compute", "network", "storage", or "database"
-        validation_focus_description: What to specifically validate
-        llm_manager: LLM manager
-        tool_manager: Tool manager (for RAG)
-    
-    Returns:
-        Updated state with validation_feedback
+    ROLE: Check if recommendations are correct.
+    INPUT: Architect's recommendations
+    OUTPUT: Validation feedback (pass/fail with details)
     """
     
     node_name = f"{domain}_validator"
@@ -163,167 +106,111 @@ def generic_domain_validator(
     start_time = time.time()
     
     try:
-        # ============ GET VALIDATION TASK ============
-        validation_tasks = state.get("architecture_domain_tasks", {}).get("validation_tasks", {})
-        domain_validation = validation_tasks.get(domain, {})
+        # Get what architect generated
+        components = state.get("architecture_components", {})
+        domain_recommendations = components.get(domain, {}).get("recommendations", "")
         
-        if not domain_validation:
-            logger.info(f"No validation task for {domain}, skipping")
+        if not domain_recommendations:
             return cast(ArchitectureState, {
                 "validation_feedback": [{
                     "domain": domain,
                     "status": "skipped",
-                    "validation_result": f"No validation tasks for {domain}",
-                    "components_validated": [],
+                    "result": "No recommendations to validate",
                     "has_errors": False
                 }]
             })
         
-        # ============ GET RECOMMENDATIONS TO VALIDATE ============
-        components = state.get("architecture_components", {})
-        domain_components = components.get(domain, {})
-        recommendations = domain_components.get('recommendations', '')
-        
-        # ============ CREATE VALIDATION PROMPT ============
-        components_to_validate = domain_validation.get("components_to_validate", [])
-        validation_focus = domain_validation.get("validation_focus", "general validation")
-        
+        # Create validation prompt
         system_prompt = f"""
-You are a {domain.capitalize()} Domain Validator for AWS.
-Validate the architecture against AWS documentation.
+You are validating AWS architecture recommendations against official AWS documentation.
 
-**Components to Validate**: {', '.join(components_to_validate)}
-**Validation Focus**: {validation_focus}
-**What to Check**:
-{validation_focus_description}
+**Domain**: {domain.capitalize()}
+**What to Check**: {get_validation_focus(domain)}
 
-**Proposed {domain.capitalize()} Architecture**:
-{recommendations}
+**Architect's Recommendation**:
+{domain_recommendations}
 
-**How to Validate**:
-1. Use RAG_search to find AWS documentation for each service
-2. Check if the recommendations match the docs
-3. Flag any errors, misconfigurations, or missing best practices
-4. Rate your confidence level
+**Your Task**:
+1. Search AWS docs for each service mentioned using RAG_search
+2. Check if the configuration is valid
+3. Check if best practices are followed
+4. List any errors or issues found
+5. Rate confidence (0-100%)
+
+DO NOT try to improve or regenerate.
+ONLY report what is wrong (or correct).
 
 **Report Format**:
-- List valid components (correctly configured)
-- List issues (errors, gaps, improvements)
-- Recommendations for fixes
-- Overall confidence (0-100%)
+- Valid components (if any)
+- Issues found (be specific)
+- Severity (critical/warning/info)
+- Confidence in assessment
         """
         
         local_messages = [
             SystemMessage(content=system_prompt),
-            HumanMessage(content=f"Validate these {domain} components: {', '.join(components_to_validate)}")
+            HumanMessage(content=f"Validate {domain} recommendations")
         ]
         
-        # ============ EXECUTE WITH TOOLS ============
+        # Execute with tools - ONLY RAG for documentation search
         tools_dict = tool_manager.get_all_tools()
-        rag_tools = {k: v for k, v in tools_dict.items() if k == "RAG_search"}
+        rag_only = {"RAG_search": tools_dict["RAG_search"]}
         
-        llm_with_tools = llm_manager.get_mini_with_tools(list(rag_tools.values()))
+        llm_with_tools = llm_manager.get_mini_with_tools(list(rag_only.values()))
         
-        final_response = execute_tool_calls(
+        response = execute_tool_calls(
             local_messages,
             llm_with_tools,
-            rag_tools,
+            rag_only,
             timeout=timeout
         )
         
-        validation_result = getattr(final_response, "content", "Validation completed")
-        
-        # ============ DETECT ERRORS ============
-        # Use LLM to intelligently detect if there are errors
+        validation_result = getattr(response, "content", "Validation completed")
         has_errors = detect_errors_llm(validation_result)
         
         duration = time.time() - start_time
-        logger.info(f"{domain.capitalize()} validator completed in {duration:.2f}s (errors: {has_errors})")
+        logger.info(f"{domain.capitalize()} validator: {duration:.2f}s (errors: {has_errors})")
         
-        # ============ RETURN FEEDBACK ============
         return cast(ArchitectureState, {
             "validation_feedback": [{
                 "domain": domain,
-                "validation_result": validation_result,
-                "components_validated": components_to_validate,
+                "result": validation_result,
                 "has_errors": has_errors
             }],
-            "factual_errors_exist": has_errors
+            "has_validation_errors": has_errors
         })
     
     except Exception as e:
-        error_msg = f"Validation error: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        
+        logger.error(f"{domain} validator error: {e}")
         return cast(ArchitectureState, {
             "validation_feedback": [{
                 "domain": domain,
-                "validation_result": error_msg,
-                "components_validated": [],
+                "result": f"Validation error: {str(e)}",
                 "has_errors": True
             }],
-            "factual_errors_exist": True
+            "has_validation_errors": True
         })
 
 
-# ============================================================================
-# CONCRETE VALIDATOR FUNCTIONS
-# ============================================================================
-
+# Concrete validators
 def compute_validator(state: ArchitectureState, llm_manager, tool_manager) -> ArchitectureState:
-    """Validate compute domain architecture."""
-    validation_focus = """
-1. Service names exist and versions are correct
-2. Instance types and sizing are appropriate
-3. Auto Scaling configurations are valid
-4. Best practices are followed
-5. Configuration parameters are valid
-    """
-    return generic_domain_validator(
-        state, "compute", validation_focus, llm_manager, tool_manager
-    )
+    """Validate compute domain."""
+    return generic_domain_validator(state, "compute", llm_manager, tool_manager)
 
 
 def network_validator(state: ArchitectureState, llm_manager, tool_manager) -> ArchitectureState:
-    """Validate network domain architecture."""
-    validation_focus = """
-1. VPC CIDR blocks and subnet sizing
-2. Security Group rules are valid
-3. Load Balancer configurations
-4. DNS and CDN setup
-5. Network connectivity flow
-    """
-    return generic_domain_validator(
-        state, "network", validation_focus, llm_manager, tool_manager
-    )
+    """Validate network domain."""
+    return generic_domain_validator(state, "network", llm_manager, tool_manager)
 
 
 def storage_validator(state: ArchitectureState, llm_manager, tool_manager) -> ArchitectureState:
-    """Validate storage domain architecture."""
-    validation_focus = """
-1. S3 bucket configuration and access
-2. EBS volume types and configurations
-3. EFS setup and performance
-4. Lifecycle policies
-5. Encryption and compliance
-    """
-    return generic_domain_validator(
-        state, "storage", validation_focus, llm_manager, tool_manager
-    )
+    """Validate storage domain."""
+    return generic_domain_validator(state, "storage", llm_manager, tool_manager)
 
 
 def database_validator(state: ArchitectureState, llm_manager, tool_manager) -> ArchitectureState:
-    """Validate database domain architecture."""
-    validation_focus = """
-1. Engine selection and versions
-2. Instance sizing and types
-3. Backup and recovery settings
-4. High availability setup
-5. Security and encryption
-    """
-    return generic_domain_validator(
-        state, "database", validation_focus, llm_manager, tool_manager
-    )
+    """Validate database domain."""
+    return generic_domain_validator(state, "database", llm_manager, tool_manager)
 
 
 def validation_synthesizer(
@@ -331,12 +218,11 @@ def validation_synthesizer(
     llm_manager
 ) -> ArchitectureState:
     """
-    Summarize all validation feedback into actionable insights.
+    Summarize validation results.
     
-    WHY SEPARATE FROM VALIDATORS?
-    Validators run in parallel and each produces domain-specific feedback.
-    Synthesizer runs AFTER all validators complete and creates a unified summary.
-    This summary informs the iteration decision.
+    ROLE: Create summary of all validation feedback.
+    INPUT: Validation feedback from all validators
+    OUTPUT: Summary report and pass/fail decision
     """
     
     logger.info("--- Validation Synthesizer ---")
@@ -346,58 +232,48 @@ def validation_synthesizer(
         
         if not all_feedback:
             return cast(ArchitectureState, {
-                "validation_summary": "No validation feedback available"
+                "validation_summary": "No validation performed",
+                "has_validation_errors": False
             })
         
-        # ============ PREPARE FEEDBACK FOR SUMMARY ============
-        feedback_summaries = []
-        error_count = 0
+        # Count errors
+        error_count = sum(1 for fb in all_feedback if fb.get("has_errors", False))
         
-        for feedback in all_feedback:
-            domain = feedback.get("domain", "unknown")
-            has_errors = feedback.get("has_errors", False)
-            result = feedback.get("validation_result", "")[:300]
-            
-            if has_errors:
-                error_count += 1
-            
-            feedback_summaries.append(f"""
-**{domain.upper()}**: {result}...
-            """)
+        feedback_text = "\n".join([
+            f"**{fb['domain'].upper()}**: {fb['result'][:200]}..."
+            for fb in all_feedback
+        ])
         
-        # ============ CREATE SUMMARY PROMPT ============
+        # Create summary
         system_prompt = f"""
-You are synthesizing validation feedback from 4 domain validators.
+Summarize validation results for the architecture.
 
-**Validation Feedback**:
-{''.join(feedback_summaries)}
+**Validation Results**:
+{feedback_text}
 
-**Error Count**: {error_count} domains have issues
+**Errors Found**: {error_count} domain(s)
 
-Create a concise summary that includes:
-1. Overall validation status (passed/failed)
+Create a concise summary:
+1. Overall status (PASS / FAIL)
 2. Critical issues that must be fixed
 3. Non-critical improvements
-4. Recommendations for next iteration (if needed)
+4. What to fix if retrying
         """
         
         messages = [SystemMessage(content=system_prompt)]
         reasoning_llm = llm_manager.get_reasoning_llm()
         response = reasoning_llm.invoke(messages)
         
-        if not response or not hasattr(response, "content"):
-            raise ValueError("Empty response from validation synthesizer")
-        
-        validation_summary = response.content
-        
-        logger.info("Validation synthesizer completed")
+        summary = getattr(response, "content", "Validation summary unavailable")
         
         return cast(ArchitectureState, {
-            "validation_summary": validation_summary
+            "validation_summary": summary,
+            "has_validation_errors": error_count > 0
         })
     
     except Exception as e:
-        logger.error(f"Validation synthesizer error: {e}", exc_info=True)
+        logger.error(f"Validation synthesizer error: {e}")
         return cast(ArchitectureState, {
-            "validation_summary": f"Error synthesizing feedback: {str(e)}"
+            "validation_summary": f"Error: {str(e)}",
+            "has_validation_errors": True
         })

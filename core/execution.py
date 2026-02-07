@@ -12,19 +12,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# WHY THIS SEPARATE MODULE?
-# ============================================================================
-# Tool execution is complex and error-prone:
-# - LLM might not return valid tool calls
-# - Tools might fail
-# - Network might timeout
-# - We want retry logic and error messages
-#
-# This module encapsulates all that complexity.
-# ============================================================================
-
-
 def execute_tool_calls(
     messages: List,
     llm_with_tools,
@@ -42,29 +29,6 @@ def execute_tool_calls(
     3. Execute tool X
     4. Add result to messages
     5. Repeat until LLM says "done"
-    
-    Args:
-        messages: List of chat messages
-        llm_with_tools: LLM instance with tools bound
-        tools: Dict mapping tool names to Tool objects
-        max_iterations: Max tool calls before giving up
-        timeout: Max seconds for entire execution
-        retry_attempts: How many times to retry failed LLM calls
-    
-    Returns:
-        Final AIMessage from LLM
-    
-    Example:
-        messages = [
-            SystemMessage(content="You are helpful..."),
-            HumanMessage(content="What's 2+2?")
-        ]
-        response = execute_tool_calls(
-            messages,
-            llm_with_tools=model.bind_tools([add_tool]),
-            tools={"add": add_tool}
-        )
-        print(response.content)  # "The answer is 4"
     """
     
     tool_iterations = 0
@@ -98,7 +62,7 @@ def execute_tool_calls(
         
         # Check if LLM wants to call tools
         if hasattr(response, "tool_calls") and response.tool_calls:
-            messages.append(response)  # Add LLM response
+            messages.append(response)
             
             # Execute each tool call
             for tool_call in response.tool_calls:
@@ -106,14 +70,12 @@ def execute_tool_calls(
                 
                 if tool_name in tools:
                     try:
-                        # Tool takes 'args' dict and converts to kwargs
                         tool_args = tool_call.get("args", {})
                         if not isinstance(tool_args, dict):
                             tool_args = {"query": str(tool_args)}
                         
                         tool_result = tools[tool_name].invoke(tool_args)
                         
-                        # Add tool result to messages
                         messages.append(ToolMessage(
                             content=str(tool_result),
                             tool_call_id=tool_call["id"]
@@ -133,12 +95,10 @@ def execute_tool_calls(
             
             tool_iterations += 1
         else:
-            # LLM didn't call a tool - it's done!
             final_response = response
             break
     
     if final_response is None:
-        # Try to return last response if available
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
                 final_response = msg
@@ -152,7 +112,47 @@ def execute_tool_calls(
 def detect_errors_llm(validation_result: str) -> bool:
     """
     Use LLM to detect if validation found errors.
-    More reliable than keyword matching.
     """
-    # (Implementation from previous code - omitted for brevity)
-    pass
+    from core.tools import LLMManager
+    
+    try:
+        llm_manager = LLMManager()
+        mini_llm = llm_manager.get_mini_llm()
+        
+        # Smart truncation
+        max_length = 1000
+        if len(validation_result) > max_length:
+            first_part = validation_result[:700]
+            last_part = validation_result[-300:]
+            truncated = f"{first_part}\n\n[... truncated ...]\n\n{last_part}"
+        else:
+            truncated = validation_result
+        
+        error_detection_prompt = f"""
+Analyze this validation result and determine if it indicates any errors or issues.
+
+Validation Result:
+{truncated}
+
+Respond with ONLY the word "YES" if there are errors, or ONLY the word "NO" if everything is valid.
+        """
+        
+        response = mini_llm.invoke([SystemMessage(content=error_detection_prompt)])
+        result_text = getattr(response, "content", "").strip().upper()
+        
+        if result_text.startswith("YES"):
+            return True
+        elif result_text.startswith("NO"):
+            return False
+        else:
+            # Fallback to keyword matching
+            strong_indicators = ["error", "incorrect", "invalid", "misconfiguration", "wrong", "needs fix"]
+            weak_indicators = ["problem", "should be", "issue", "fix", "improve"]
+            
+            strong_count = sum(1 for kw in strong_indicators if kw in validation_result.lower())
+            weak_count = sum(1 for kw in weak_indicators if kw in validation_result.lower())
+            
+            return strong_count >= 1 or weak_count >= 2
+    except Exception as e:
+        logger.warning(f"Error detection failed, returning True (assume error): {e}")
+        return True

@@ -4,7 +4,7 @@
 # ============================================================================
 
 from typing import cast, Dict, Any, Optional
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from core.types import ArchitectureState
 from core.execution import execute_tool_calls
 import logging
@@ -13,34 +13,15 @@ import time
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# WHY SEPARATE ARCHITECT FOR EACH DOMAIN?
-# ============================================================================
-# Each domain has different expertise, considerations, and tools:
-# - COMPUTE: EC2 sizing, Lambda concurrency, Auto Scaling policies
-# - NETWORK: VPC CIDR planning, Security Groups, Load Balancing
-# - STORAGE: S3 tiers, EBS optimization, Backup strategies
-# - DATABASE: Multi-AZ setup, Read replicas, Connection pooling
-#
-# While the code structure is similar, the prompts are very different.
-# Keeping them separate makes it easy to customize each one.
-# ============================================================================
-
-
 def format_component_recommendations(
     domain_name: str,
     task_info: Dict[str, Any],
     generated_text: Optional[str]
 ) -> str:
-    """
-    Format architect output or fallback when generation fails.
-    
-    WHY? Graceful degradation - if LLM fails, we still return something useful.
-    """
+    """Format architect output or fallback when generation fails."""
     if generated_text and generated_text.strip():
         return generated_text.strip()
     
-    # Fallback to structured format
     requirements = task_info.get("requirements", []) or []
     deliverables = task_info.get("deliverables", []) or []
     
@@ -72,36 +53,9 @@ def generic_domain_architect(
     """
     Generic architect function for any domain.
     
-    WHY GENERIC?
-    Instead of duplicating code 4 times (compute, network, storage, database),
-    we parameterize the domain and services. DRY principle.
-    
-    FLOW:
-    1. Get task assigned to this domain from state
-    2. Get validation feedback from previous iteration (if any)
-    3. Create system prompt specific to this domain
-    4. Execute LLM with tools (web search + RAG)
-    5. Return architecture recommendations
-    
-    Args:
-        state: Current state
-        domain: "compute", "network", "storage", or "database"
-        domain_services: Description of services in this domain
-        llm_manager: Manager for LLM instances
-        tool_manager: Manager for tools (web search, RAG)
-        timeout: Max seconds for tool execution
-    
-    Returns:
-        Updated state with architecture_components
-    
-    Example:
-        result = generic_domain_architect(
-            state,
-            domain="compute",
-            domain_services="EC2, Lambda, ECS, EKS, Auto Scaling",
-            llm_manager=llm_manager,
-            tool_manager=tool_manager
-        )
+    ROLE: Generate architecture recommendations for a domain.
+    INPUT: Task from supervisor, validation feedback (if any)
+    OUTPUT: Architecture recommendations for this domain
     """
     
     node_name = f"{domain}_architect"
@@ -109,7 +63,7 @@ def generic_domain_architect(
     start_time = time.time()
     
     try:
-        # ============ GET TASK FOR THIS DOMAIN ============
+        # Get task for this domain
         domain_task = state["architecture_domain_tasks"].get(domain, {})
         
         if not domain_task or not domain_task.get("task_description"):
@@ -125,8 +79,7 @@ def generic_domain_architect(
                 }
             })
         
-        # ============ GET PREVIOUS VALIDATION FEEDBACK ============
-        # If this is not the first iteration, we want to incorporate feedback
+        # Get previous validation feedback
         validation_feedback = state.get("validation_feedback", [])
         domain_feedback = [
             fb for fb in validation_feedback
@@ -139,11 +92,10 @@ def generic_domain_architect(
             for fb in domain_feedback:
                 has_errors = fb.get("has_errors", False)
                 status = "❌ ERRORS" if has_errors else "✓ PASSED"
-                result = fb.get("validation_result", "")[:200]
+                result = fb.get("result", "")[:200]
                 feedback_context += f"{status}: {result}...\n"
         
-        # ============ CREATE SYSTEM PROMPT ============
-        # This is domain-specific. Different prompts for compute vs network.
+        # Create system prompt
         overall_goals = state["architecture_domain_tasks"].get("overall_goals", [])
         constraints = state["architecture_domain_tasks"].get("constraints", [])
         
@@ -176,15 +128,13 @@ If this is not the first iteration and feedback was provided,
 address the issues that were found. Explain your improvements.
         """
         
-        # ============ PREPARE MESSAGES ============
-        # Messages are local to this function - NOT added to global state
-        # Why? Prevent exponential message growth across iterations
+        # Prepare messages
         local_messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=state["user_problem"])
         ]
         
-        # ============ EXECUTE WITH TOOLS ============
+        # Execute with tools
         tools_dict = tool_manager.get_all_tools()
         llm_with_tools = llm_manager.get_mini_with_tools(list(tools_dict.values()))
         
@@ -197,7 +147,7 @@ address the issues that were found. Explain your improvements.
             retry_attempts=2
         )
         
-        # ============ VALIDATE RESPONSE ============
+        # Validate response
         if not final_response:
             raise ValueError("No response from LLM")
         
@@ -210,7 +160,6 @@ address the issues that were found. Explain your improvements.
         duration = time.time() - start_time
         logger.info(f"{domain.capitalize()} architect completed in {duration:.2f}s")
         
-        # ============ RETURN UPDATE ============
         return cast(ArchitectureState, {
             "architecture_components": {
                 domain: {
@@ -236,17 +185,8 @@ address the issues that were found. Explain your improvements.
         })
 
 
-# ============================================================================
-# CONCRETE ARCHITECT FUNCTIONS
-# ============================================================================
-# These are thin wrappers around the generic function with domain-specific params.
-# This approach is DRY - all the logic is in generic_domain_architect.
-# ============================================================================
-
 def compute_architect(state: ArchitectureState, llm_manager, tool_manager) -> ArchitectureState:
-    """
-    Architect for compute domain: EC2, Lambda, ECS, EKS, Auto Scaling, etc.
-    """
+    """Architect for compute domain."""
     return generic_domain_architect(
         state,
         domain="compute",
@@ -257,9 +197,7 @@ def compute_architect(state: ArchitectureState, llm_manager, tool_manager) -> Ar
 
 
 def network_architect(state: ArchitectureState, llm_manager, tool_manager) -> ArchitectureState:
-    """
-    Architect for network domain: VPC, ALB, Route 53, CloudFront, Security Groups, etc.
-    """
+    """Architect for network domain."""
     return generic_domain_architect(
         state,
         domain="network",
@@ -270,9 +208,7 @@ def network_architect(state: ArchitectureState, llm_manager, tool_manager) -> Ar
 
 
 def storage_architect(state: ArchitectureState, llm_manager, tool_manager) -> ArchitectureState:
-    """
-    Architect for storage domain: S3, EBS, EFS, Glacier, etc.
-    """
+    """Architect for storage domain."""
     return generic_domain_architect(
         state,
         domain="storage",
@@ -283,9 +219,7 @@ def storage_architect(state: ArchitectureState, llm_manager, tool_manager) -> Ar
 
 
 def database_architect(state: ArchitectureState, llm_manager, tool_manager) -> ArchitectureState:
-    """
-    Architect for database domain: RDS, DynamoDB, ElastiCache, etc.
-    """
+    """Architect for database domain."""
     return generic_domain_architect(
         state,
         domain="database",

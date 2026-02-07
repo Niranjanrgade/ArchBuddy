@@ -7,27 +7,8 @@ from pydantic import BaseModel, Field
 from typing import List
 
 
-# ============================================================================
-# WHY PYDANTIC MODELS?
-# ============================================================================
-# LLMs can be unpredictable. Pydantic ensures the LLM output follows a schema.
-# Without this, the LLM might return random text instead of structured data.
-#
-# Example without schema (BAD):
-#   LLM: "Here are the tasks: compute is important, network is too..."
-#   Your code: task.domain -> ERROR (string has no attribute 'domain')
-#
-# Example with schema (GOOD):
-#   LLM: Forced to return {"tasks": [...], "goals": [...]}
-#   Your code: task_decomposition.tasks[0].domain -> "compute" ✓
-# ============================================================================
-
-
 class DomainTask(BaseModel):
-    """
-    A single task for one domain architect.
-    LLM MUST return this structure.
-    """
+    """A single task for one domain architect."""
     domain: str = Field(description="Domain name: compute, network, storage, or database")
     task_description: str = Field(description="What should this domain architect do?")
     requirements: List[str] = Field(description="Key requirements for this domain")
@@ -35,10 +16,7 @@ class DomainTask(BaseModel):
 
 
 class TaskDecomposition(BaseModel):
-    """
-    Complete task decomposition from supervisor.
-    LLM breaks down user's problem into domain-specific tasks.
-    """
+    """Complete task decomposition from supervisor."""
     user_problem: str
     decomposed_tasks: List[DomainTask]
     overall_architecture_goals: List[str]
@@ -53,8 +31,5 @@ class ValidationTask(BaseModel):
 
 
 class ValidationDecomposition(BaseModel):
-    """
-    Validation tasks from validator supervisor.
-    What should each validator check?
-    """
+    """Validation tasks from validator supervisor."""
     validation_tasks: List[ValidationTask]

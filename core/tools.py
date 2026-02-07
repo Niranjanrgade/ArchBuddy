@@ -1,6 +1,6 @@
 # ============================================================================
 # FILE: core/tools.py
-# PURPOSE: Initialize and manage all tools (web search, RAG)
+# PURPOSE: Initialize and manage all tools
 # ============================================================================
 
 from typing import Dict
@@ -15,10 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class ToolManager:
-    """
-    Centralized tool management.
-    WHY? Separation of concern - all tool logic in one place.
-    """
+    """Centralized tool management."""
     
     def __init__(self):
         self.web_search_tool = self._init_web_search()
@@ -30,7 +27,7 @@ class ToolManager:
         return Tool(
             name="web_search",
             func=serper.run,
-            description="Search the internet for current information about AWS services"
+            description="Search the internet for current information about AWS services and best practices"
         )
     
     def _init_rag(self) -> Tool:
@@ -51,7 +48,7 @@ class ToolManager:
                 
                 results = []
                 for i, doc in enumerate(docs, 1):
-                    content = doc.page_content.strip()[:2000]  # Limit length
+                    content = doc.page_content.strip()[:1000]
                     results.append(f"[Document {i}]:\n{content}\n")
                 
                 return "\n---\n".join(results)
@@ -62,7 +59,7 @@ class ToolManager:
         return Tool(
             name="RAG_search",
             func=rag_search,
-            description="Search AWS documentation for accurate architectural guidance"
+            description="Search AWS documentation for accurate architectural guidance and best practices"
         )
     
     def get_all_tools(self) -> Dict[str, Tool]:
@@ -88,7 +85,7 @@ class LLMManager:
         """Get powerful LLM for complex reasoning."""
         return self.reasoning_llm
     
-    def get_mini_with_tools(self, tools: list) -> object:
+    def get_mini_with_tools(self, tools: list):
         """Bind tools to mini LLM for tool calling."""
         return self.mini_llm.bind_tools(tools)
     
