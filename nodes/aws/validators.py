@@ -56,10 +56,15 @@ def validator_supervisor(
         # For each domain that has components, create validation task
         validation_tasks_update = {}
         
-        for domain in architecture_components.keys():
-            validation_tasks_update[domain] = {
-                "components_to_validate": get_services_for_domain(domain),
-                "validation_focus": get_validation_focus(domain)
+        # Filter for AWS components
+        aws_keys = [k for k in architecture_components.keys() if k.startswith("aws_")]
+        
+        for key in aws_keys:
+            # key is "aws_compute", domain_type is "compute"
+            domain_type = key.replace("aws_", "")
+            validation_tasks_update[key] = {
+                "components_to_validate": get_services_for_domain(domain_type),
+                "validation_focus": get_validation_focus(domain_type)
             }
         
         if not validation_tasks_update:
@@ -107,13 +112,14 @@ def generic_domain_validator(
     
     try:
         # Get what architect generated
+        component_key = f"aws_{domain}"
         components = state.get("architecture_components", {})
-        domain_recommendations = components.get(domain, {}).get("recommendations", "")
+        domain_recommendations = components.get(component_key, {}).get("recommendations", "")
         
         if not domain_recommendations:
             return cast(ArchitectureState, {
                 "validation_feedback": [{
-                    "domain": domain,
+                    "domain": component_key,
                     "status": "skipped",
                     "result": "No recommendations to validate",
                     "has_errors": False

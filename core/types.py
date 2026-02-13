@@ -49,6 +49,7 @@ class ArchitectureState(TypedDict):
     iteration_count: Annotated[int, last_value]
     min_iterations: Annotated[int, last_value]
     max_iterations: Annotated[int, last_value]
+    cloud_provider: Annotated[str, last_value]
     
     # ========== GENERATION PHASE ==========
     architecture_domain_tasks: Annotated[Dict[str, Dict[str, Any]], merge_dicts]
@@ -60,7 +61,7 @@ class ArchitectureState(TypedDict):
     validation_summary: Annotated[Optional[str], last_value]
     
     # ========== DECISION ==========
-    has_validation_errors: Annotated[bool, lambda a, b: b]
+    has_validation_errors: Annotated[bool, lambda a, b: a or b]
     
     # ========== FINAL OUTPUT ==========
     final_architecture: Annotated[Optional[Dict[str, Any]], last_value]
@@ -70,7 +71,8 @@ class ArchitectureState(TypedDict):
 def create_initial_state(
     user_problem: str,
     min_iterations: int = 2,
-    max_iterations: int = 3
+    max_iterations: int = 3,
+    cloud_provider: str = "AWS"
 ) -> ArchitectureState:
     """Create the initial state for a new architecture generation run."""
     from langchain_core.messages import HumanMessage
@@ -81,6 +83,7 @@ def create_initial_state(
         "iteration_count": 0,
         "min_iterations": min_iterations,
         "max_iterations": max_iterations,
+        "cloud_provider": cloud_provider,
         "architecture_domain_tasks": {},
         "architecture_components": {},
         "proposed_architecture": {},

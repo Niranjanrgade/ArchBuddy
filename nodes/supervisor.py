@@ -40,8 +40,33 @@ def architect_supervisor(
                 result = fb.get("result", "")[:100]
                 feedback_context += f"- {domain}: {result}...\n"
         
+        cloud_provider = state.get("cloud_provider", "AWS")
+        
+        provider_specifics = ""
+        if cloud_provider.upper() == "AWS":
+            provider_specifics = """
+            1. Compute (EC2, Lambda, ECS, EKS)
+            2. Network (VPC, ALB, Route 53, CloudFront)
+            3. Storage (S3, EBS, EFS)
+            4. Database (RDS, DynamoDB, ElastiCache)
+            """
+        elif cloud_provider.upper() == "AZURE":
+            provider_specifics = """
+            1. Compute (Virtual Machines, Azure Functions, AKS, App Service)
+            2. Network (VNet, App Gateway, Front Door, DNS)
+            3. Storage (Blob Storage, Azure Files, Disk Storage)
+            4. Database (Azure SQL, Cosmos DB, PostgreSQL)
+            """
+        else: # Both or Unknown, default to generic or both
+             provider_specifics = """
+             1. Compute (AWS EC2/Lambda or Azure VMs/Functions)
+             2. Network (AWS VPC or Azure VNet)
+             3. Storage (AWS S3 or Azure Blob)
+             4. Database (AWS RDS or Azure SQL)
+             """
+
         system_prompt = f"""
-You are an AWS architect supervisor.
+You are an {cloud_provider} architect supervisor.
 Break down the user's problem into tasks for different domain architects.
 
 User Problem: {state['user_problem']}
@@ -50,10 +75,7 @@ Iteration: {iteration}/{state['max_iterations']}
 {feedback_context}
 
 Create detailed tasks for these domains:
-1. Compute (EC2, Lambda, ECS, EKS)
-2. Network (VPC, ALB, Route 53, CloudFront)
-3. Storage (S3, EBS, EFS)
-4. Database (RDS, DynamoDB, ElastiCache)
+{provider_specifics}
 
 For each domain, provide:
 - Clear task description

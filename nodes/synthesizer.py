@@ -55,8 +55,8 @@ def architect_synthesizer(
         
         # Create synthesizer prompt
         system_prompt = f"""
-You are a Principal Solutions Architect at AWS.
-You have received architecture designs from 4 specialist architects.
+You are a Principal Cloud Solutions Architect.
+You have received architecture designs from specialist architects.
 Your job is to synthesize these into ONE coherent, integrated architecture.
 
 **Original Problem**: {state['user_problem']}
@@ -109,4 +109,70 @@ Your job is to synthesize these into ONE coherent, integrated architecture.
                 "architecture_summary": error_msg,
                 "error": str(e)
             }
+        })
+
+
+def validation_synthesizer(
+    state: ArchitectureState,
+    llm_manager
+) -> ArchitectureState:
+    """
+    Summarize validation results.
+    
+    ROLE: Create summary of all validation feedback.
+    INPUT: Validation feedback from all validators
+    OUTPUT: Summary report and pass/fail decision
+    """
+    
+    logger.info("--- Validation Synthesizer ---")
+    
+    try:
+        all_feedback = state.get("validation_feedback", [])
+        
+        if not all_feedback:
+            return cast(ArchitectureState, {
+                "validation_summary": "No validation performed",
+                "has_validation_errors": False
+            })
+        
+        # Count errors
+        error_count = sum(1 for fb in all_feedback if fb.get("has_errors", False))
+        
+        feedback_text = "\n".join([
+            f"**{fb.get('domain', 'unknown').upper()}**: {fb.get('result', '')[:200]}..."
+            for fb in all_feedback
+        ])
+        
+        # Create summary
+        system_prompt = f"""
+Summarize validation results for the architecture.
+
+**Validation Results**:
+{feedback_text}
+
+**Errors Found**: {error_count} domain(s)
+
+Create a concise summary:
+1. Overall status (PASS / FAIL)
+2. Critical issues that must be fixed
+3. Non-critical improvements
+4. What to fix if retrying
+        """
+        
+        messages = [SystemMessage(content=system_prompt)]
+        reasoning_llm = llm_manager.get_reasoning_llm()
+        response = reasoning_llm.invoke(messages)
+        
+        summary = getattr(response, "content", "Validation summary unavailable")
+        
+        return cast(ArchitectureState, {
+            "validation_summary": summary,
+            "has_validation_errors": error_count > 0
+        })
+    
+    except Exception as e:
+        logger.error(f"Validation synthesizer error: {e}")
+        return cast(ArchitectureState, {
+            "validation_summary": f"Error: {str(e)}",
+            "has_validation_errors": True
         })
